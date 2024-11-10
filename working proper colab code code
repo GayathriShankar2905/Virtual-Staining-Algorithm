@@ -4,8 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Path to input folder containing images
-input_folder = '/content/your_input_folder'  # Replace with your input folder path
-output_folder = '/content/preprocessed'      # Folder where preprocessed images will be saved
+input_folder = '/content/Brightfield'  # Replace with your input folder path
+output_folder = '/content/Preprocessed'      # Folder where preprocessed images will be saved
 
 # Create the output folder if it doesn't exist
 os.makedirs(output_folder, exist_ok=True)
@@ -111,6 +111,7 @@ for image_file in os.listdir(input_folder):
             cv2.imwrite(output_path, multiplied_image)
         else:
             print(f"Failed to load image: {image_file}")
+
 
 
 import os
@@ -340,4 +341,3 @@ if os.path.exists(sample_image_path):
         print(f"Failed to load sample image at {sample_image_path}")
 else:
     print(f"Sample image file does not exist at {sample_image_path}")
-
