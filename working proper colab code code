@@ -218,3 +218,126 @@ if os.path.exists(sample_image_path):
         print(f"Failed to load sample image at {sample_image_path}")
 else:
     print(f"Sample image file does not exist at {sample_image_path}")
+
+
+import os
+import cv2
+import numpy as np
+from matplotlib import pyplot as plt
+
+# Define paths to the preprocessed and label image folders
+preprocessed_folder = '/content/Preprocessed'  # Update with your actual preprocessed folder path
+label_folder = '/content/labels'               # Update with your actual label folder path
+output_folder = '/content/TestingFolderforUNET'  # Folder to save the result images
+
+# Clear the output folder by deleting all existing files
+for file in os.listdir(output_folder):
+    file_path = os.path.join(output_folder, file)
+    if os.path.isfile(file_path):
+        os.remove(file_path)
+
+# Create the output folder if it doesn't exist
+os.makedirs(output_folder, exist_ok=True)
+
+# List filenames from both folders
+preprocessed_filenames = sorted([f for f in os.listdir(preprocessed_folder) if f.endswith('.jpg')])
+label_filenames = sorted([f for f in os.listdir(label_folder) if f.endswith('.png')])
+
+# Print filenames for debugging
+print(f"Preprocessed Folder Files: {preprocessed_filenames}")
+print(f"Label Folder Files: {label_filenames}")
+
+# Process images by matching filenames
+for preprocessed_file in preprocessed_filenames:
+    # Check if the corresponding label image exists based on the base filename (e.g., 1.0.jpg -> 1_combined.png)
+    base_filename = preprocessed_file.split('.')[0]  # Extract base name (e.g., 1.0 -> 1)
+    label_file = f"{base_filename}_combined.png"  # Construct corresponding label filename
+
+    # Check if the label file exists in the label folder
+    if label_file in label_filenames:
+        print(f"Processing: {preprocessed_file} and {label_file}")
+        
+        # Load the preprocessed image and the label image
+        preprocessed_image_path = os.path.join(preprocessed_folder, preprocessed_file)
+        label_image_path = os.path.join(label_folder, label_file)
+        
+        preprocessed_image = cv2.imread(preprocessed_image_path)
+        label_image = cv2.imread(label_image_path)
+
+        # Check if images are loaded correctly
+        if preprocessed_image is None:
+            print(f"Error loading preprocessed image at {preprocessed_image_path}")
+            continue
+        if label_image is None:
+            print(f"Error loading label image at {label_image_path}")
+            continue
+        
+        # Resize images to the same size if necessary
+        desired_size = (256, 256)  # Update this size as needed
+        preprocessed_image = cv2.resize(preprocessed_image, desired_size)
+        label_image = cv2.resize(label_image, desired_size)
+        
+        # Normalize images to [0, 1] range for multiplication
+        preprocessed_image = preprocessed_image.astype(np.float32) / 255.0
+        label_image = label_image.astype(np.float32) / 255.0
+        
+        # Multiply the images element-wise (preserving color)
+        multiplied_image = np.multiply(preprocessed_image, label_image)
+
+        # Normalize the multiplied image to [0, 1] range
+        multiplied_image = np.clip(multiplied_image, 0, 1)
+
+        # Convert the multiplied image back to [0, 255] range for saving/displaying
+        multiplied_image = (multiplied_image * 255).astype(np.uint8)
+
+        # Extract the green and red channels from the label image
+        green_channel = label_image[:, :, 1]  # Extract the green channel
+        red_channel = label_image[:, :, 2]    # Extract the red channel
+
+        # Brighten the green and red channels by increasing their intensity
+        green_channel_bright = cv2.convertScaleAbs(green_channel * 255, alpha=1.2, beta=30)
+        red_channel_bright = cv2.convertScaleAbs(red_channel * 255, alpha=1.2, beta=30)
+
+        # Create a new label image with brightened green and red channels
+        brightened_label_image = label_image.copy()
+        brightened_label_image[:, :, 1] = green_channel_bright / 255.0
+        brightened_label_image[:, :, 2] = red_channel_bright / 255.0
+
+        # Multiply the original preprocessed image with the brightened label image
+        final_image = np.multiply(preprocessed_image, brightened_label_image)
+
+        # Normalize the final image to [0, 1] range
+        final_image = np.clip(final_image, 0, 1)
+
+        # Convert the final image back to [0, 255] range for saving/displaying
+        final_image = (final_image * 255).astype(np.uint8)
+
+        # Save the final image with brightened green and red areas
+        output_path = os.path.join(output_folder, f"{base_filename}_brightened.png")
+        cv2.imwrite(output_path, final_image)
+        print(f"Saved final image with brightened cells as {output_path}")
+
+# Check if the output folder has images
+output_files = os.listdir(output_folder)
+if not output_files:
+    print("No images saved in the output folder.")
+else:
+    print(f"Files in the output folder: {output_files}")
+
+# Optional: Visualize one of the output images
+sample_image_path = os.path.join(output_folder, f"{preprocessed_filenames[0].split('.')[0]}_brightened.png")
+
+if os.path.exists(sample_image_path):
+    sample_image = cv2.imread(sample_image_path)
+    
+    if sample_image is not None:
+        plt.figure()
+        plt.imshow(cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+        plt.title(f'Sample Brightened Image: {preprocessed_filenames[0].split(".")[0]}')
+        plt.axis('off')
+        plt.show()
+    else:
+        print(f"Failed to load sample image at {sample_image_path}")
+else:
+    print(f"Sample image file does not exist at {sample_image_path}")
+
