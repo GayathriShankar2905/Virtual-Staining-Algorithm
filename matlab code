@@ -1,256 +1,213 @@
-% Clear workspace and close figures
-clc;
-clear;
-close all;
+import os
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
 
-% Step 1: Load the image
-image_path = '1.0.jpg'; % Update with your image path
-original_image = imread(image_path);
+# Path to input folder containing images
+input_folder = '/content/your_input_folder'  # Replace with your input folder path
+output_folder = '/content/preprocessed'      # Folder where preprocessed images will be saved
 
-% Step 2: Resize the image to a desired size
-desired_size = [512, 512];
-resized_image = imresize(original_image, desired_size);
+# Create the output folder if it doesn't exist
+os.makedirs(output_folder, exist_ok=True)
 
-% Step 3: Convert the image to Grayscale
-gray_image = rgb2gray(resized_image);
+# Function to preprocess the images and display each step for one specified image
+def preprocess_image(image, display=False):
+    # Step 2: Resize the image to a desired size
+    desired_size = (512, 512)
+    resized_image = cv2.resize(image, desired_size)
 
-% Step 4: Contrast Enhancement
-contrast_enhanced = imadjust(gray_image);
+    # Step 3: Convert the image to Grayscale
+    gray_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
 
-% Step 5: Sharpening
-sharpening_kernel = [0 -1 0; -1 5 -1; 0 -1 0];
-sharpened_image = imfilter(contrast_enhanced, sharpening_kernel);
+    # Step 4: Contrast Enhancement
+    contrast_enhanced = cv2.convertScaleAbs(gray_image, alpha=1.5, beta=0)
 
-% Step 6: Thresholding using Otsu's method to convert to binary image
-level = graythresh(sharpened_image);
-thresholded_image = imbinarize(sharpened_image, level);
+    # Step 5: Sharpening
+    sharpening_kernel = np.array([[0, -1, 0],
+                                  [-1, 5, -1],
+                                  [0, -1, 0]])
+    sharpened_image = cv2.filter2D(contrast_enhanced, -1, sharpening_kernel)
 
-% Step 7: Apply Morphological Open (Dilate then Erode with Circular SE)
-SE = strel('disk', 9);  % Circular SE for open operation
-morph_open = imopen(thresholded_image, SE);
+    # Step 6: Apply Semi-Thresholding
+    threshold_value = 127
+    _, semi_thresholded = cv2.threshold(gray_image, threshold_value, 255, cv2.THRESH_TOZERO)
 
-% Step 8: Apply Morphological Close (Erode then Dilate with Circular SE)
-morph_close = imclose(thresholded_image, SE);
+    # Step 7: Apply Morphological Open (Dilate then Erode with Circular SE)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+    morph_open = cv2.dilate(semi_thresholded, kernel, iterations=1)
+    morph_open = cv2.erode(morph_open, kernel, iterations=1)
 
-% Step 9: Background Removal (Invert the image to ensure white cells)
-background_removed = imcomplement(morph_open);
+    # Step 8: Multiply Sharpened Image with Morphological Open
+    sharpened_image_resized = cv2.resize(sharpened_image, (morph_open.shape[1], morph_open.shape[0]))
+    multiplied_image = cv2.bitwise_and(sharpened_image_resized, morph_open)
 
-% Step 10: Dilation (expand bright regions)
-dilated_image = imdilate(background_removed, SE);
+    if display:
+        # Display each step
+        plt.figure(figsize=(20, 10))
+        
+        # Original Image
+        plt.subplot(3, 4, 1)
+        plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        plt.title('Original Image')
+        plt.axis('off')
+        
+        # Resized Image
+        plt.subplot(3, 4, 2)
+        plt.imshow(cv2.cvtColor(resized_image, cv2.COLOR_BGR2RGB))
+        plt.title('Resized Image')
+        plt.axis('off')
+        
+        # Grayscale Image
+        plt.subplot(3, 4, 3)
+        plt.imshow(gray_image, cmap='gray')
+        plt.title('Grayscale Image')
+        plt.axis('off')
+        
+        # Contrast Enhanced Image
+        plt.subplot(3, 4, 4)
+        plt.imshow(contrast_enhanced, cmap='gray')
+        plt.title('Contrast Enhanced')
+        plt.axis('off')
+        
+        # Sharpened Image
+        plt.subplot(3, 4, 5)
+        plt.imshow(sharpened_image, cmap='gray')
+        plt.title('Sharpened Image')
+        plt.axis('off')
+        
+        # Semi-Thresholded Image
+        plt.subplot(3, 4, 6)
+        plt.imshow(semi_thresholded, cmap='gray')
+        plt.title('Semi-Thresholded Image')
+        plt.axis('off')
+        
+        # Morphological Open Image
+        plt.subplot(3, 4, 7)
+        plt.imshow(morph_open, cmap='gray')
+        plt.title('Morphological Open')
+        plt.axis('off')
+        
+        # Multiplied Image (Sharpened * Morph Open)
+        plt.subplot(3, 4, 8)
+        plt.imshow(multiplied_image, cmap='gray')
+        plt.title('Multiplied Image (Sharpened * Morph Open)')
+        plt.axis('off')
+        
+        plt.tight_layout()
+        plt.show()
 
-% Step 11: Erosion (reduce the dilated regions)
-final_image = imerode(dilated_image, SE);
+    return multiplied_image
 
-% Step 13: Apply Edge Detection (Canny)
-edges = edge(final_image, 'Canny'); % Canny edge detector
-
-% Step 14: Multiply final_image with sharpened_image (element-wise multiplication)
-% Convert both images to double precision for multiplication
-final_image_gray = double(final_image);
-sharpened_image_gray = double(sharpened_image);
-
-% Element-wise multiplication in grayscale
-multiplied_image = final_image_gray .* sharpened_image_gray;
-
-% Normalize the multiplied image to 0-255 range for uint8
-multiplied_image = mat2gray(multiplied_image);  % Normalize to [0,1]
-multiplied_image = uint8(multiplied_image * 255);  % Scale to [0,255] and convert to uint8
-
-% Step 15: Display Results
-
-% Plotting the images in a 3x5 grid
-figure;
-subplot(3, 5, 1);
-imshow(original_image);
-title('Original Image');
-axis on;
-
-subplot(3, 5, 2);
-imshow(resized_image);
-title('Resized Image');
-axis on;
-
-subplot(3, 5, 3);
-imshow(gray_image);
-title('Grayscale Image');
-axis on;
-
-subplot(3, 5, 4);
-imshow(contrast_enhanced);
-title('Contrast Enhanced Image');
-axis on;
-
-subplot(3, 5, 5);
-imshow(sharpened_image);
-title('Sharpened Image');
-axis on;
-
-subplot(3, 5, 6);
-imshow(thresholded_image);
-title('Thresholded Image');
-axis on;
-
-subplot(3, 5, 7);
-imshow(morph_open);
-title('Morphological Open');
-axis on;
-
-subplot(3, 5, 8);
-imshow(morph_close);
-title('Morphological Close');
-axis on;
-
-subplot(3, 5, 9);
-imshow(background_removed);
-title('Background Removed');
-axis on;
-
-subplot(3, 5, 10);
-imshow(dilated_image);
-title('Dilated Image');
-axis on;
-
-subplot(3, 5, 11);
-imshow(final_image);
-title('Final Image (Cells White, Background Black)');
-axis on;
-
-subplot(3, 5, 12);
-imshow(edges);
-title('Edge Detection (Canny)');
-axis on;
-
-% Display multiplied image
-figure;  % Create a new figure for the multiplied image
-imshow(multiplied_image);
-title('Multiplied Image (final_image * sharpened_image)');
-axis on;
-
-% Optional: Save the final processed image
-imwrite(multiplied_image, 'multiplied_image.png');
-disp('Multiplied image saved as multiplied_image.png');
+# Iterate over each image in the input folder and preprocess
+for image_file in os.listdir(input_folder):
+    if image_file.endswith(('.png', '.jpg', '.jpeg')):
+        image_path = os.path.join(input_folder, image_file)
+        image = cv2.imread(image_path)
+        
+        if image is not None:
+            # Preprocess the image and save it
+            multiplied_image = preprocess_image(image, display=(image_file == '1.1.jpg'))  # Display steps for '1.1.jpg'
+            output_path = os.path.join(output_folder, image_file)
+            cv2.imwrite(output_path, multiplied_image)
+        else:
+            print(f"Failed to load image: {image_file}")
 
 
+import os
+import cv2
+import numpy as np
+from matplotlib import pyplot as plt
+from skimage import exposure
 
-%-------------------------------------------------
+# Define paths to green and red image folders
+green_folder = '/content/Green'  # Update with the actual path
+red_folder = '/content/Red'      # Update with the actual path
+output_folder = '/content/labels'  # Folder to save the labeled images
 
-% Clear workspace and close all figures
-clc;
-clear;
-close all;
+# Create the output folder if it doesn't exist
+os.makedirs(output_folder, exist_ok=True)
 
-% Define the target size for resizing
-target_size = [512, 512];
+# List image filenames from both folders
+green_filenames = sorted([f for f in os.listdir(green_folder) if f.endswith('.jpg')])
+red_filenames = sorted([f for f in os.listdir(red_folder) if f.endswith('.jpg')])
 
-% Specify the images to process (one set for green and another set for red labels)
-green_images = {'1.1.jpg'};  % Green label image
-red_images = {'1.2.jpg'};    % Red label image
+# Print file names for debugging
+print(f"Green Folder Files: {green_filenames}")
+print(f"Red Folder Files: {red_filenames}")
 
-processed_images = {};
-green_overlay_image = [];
-red_overlay_image = [];
-
-% Process Green Label Images
-for i = 1:length(green_images)
-    img_name = green_images{i};
+# Match and process pairs by their naming convention
+for green_file, red_file in zip(green_filenames, red_filenames):
+    print(f"Processing: Green File: {green_file}, Red File: {red_file}")
     
-    % Read the image
-    original_image = imread(img_name);
-    
-    % Resize the image
-    resized_image = imresize(original_image, target_size);
-    
-    % Convert to grayscale
-    gray_image = rgb2gray(resized_image);
-    
-    % Thresholding using Otsu's method
-    level = graythresh(gray_image);
-    bw_image = imbinarize(gray_image, level);
-    
-    % Apply Canny edge detection
-    edges = edge(bw_image, 'Canny');
-    
-    % Create an empty RGB image for the overlay
-    overlay_image = zeros(size(resized_image), 'uint8');
-    
-    % Place edges in the green channel
-    overlay_image(:,:,2) = edges * 255;  % Green channel
-    
-    % Store the processed image
-    processed_images{i} = overlay_image;
-    
-    % Store the green overlay image for addition
-    green_overlay_image = overlay_image;
-    
-    % Display the processed image
-    figure;
-    imshow(overlay_image);
-    title(['Processed Green Label: ', img_name]);
-end
+    if green_file.split('.')[0] == red_file.split('.')[0]:  # Match by base name
+        # Load images
+        green_image_path = os.path.join(green_folder, green_file)
+        red_image_path = os.path.join(red_folder, red_file)
+        
+        green_image = cv2.imread(green_image_path)
+        red_image = cv2.imread(red_image_path)
+        
+        # Check if images are loaded correctly
+        if green_image is None:
+            print(f"Error loading green image at {green_image_path}")
+            continue
+        if red_image is None:
+            print(f"Error loading red image at {red_image_path}")
+            continue
+        
+        # Resize images to the desired size
+        desired_size = (256, 256)  # Example size, update as needed
+        green_image = cv2.resize(green_image, desired_size)
+        red_image = cv2.resize(red_image, desired_size)
+        
+        # Convert to grayscale if necessary
+        green_channel = cv2.cvtColor(green_image, cv2.COLOR_BGR2GRAY) if green_image.shape[2] == 3 else green_image
+        red_channel = cv2.cvtColor(red_image, cv2.COLOR_BGR2GRAY) if red_image.shape[2] == 3 else red_image
+        
+        # Normalize channels
+        green_channel = cv2.normalize(green_channel.astype(np.float32), None, 0, 1, cv2.NORM_MINMAX)
+        red_channel = cv2.normalize(red_channel.astype(np.float32), None, 0, 1, cv2.NORM_MINMAX)
+        
+        # Enhance channels for visibility
+        green_channel = exposure.rescale_intensity(green_channel, in_range='image')
+        red_channel = exposure.rescale_intensity(red_channel, in_range='image')
+        
+        # Create the final RGB image
+        final_image_rgb = np.zeros((desired_size[0], desired_size[1], 3), dtype=np.float32)
+        final_image_rgb[:, :, 1] = green_channel  # Green channel
+        final_image_rgb[:, :, 0] = red_channel    # Red channel
+        
+        # Save the processed image for U-Net input
+        final_rgb_path = os.path.join(output_folder, f'{green_file.split(".")[0]}_combined.png')
+        
+        # Save the image and check if it is successful
+        if cv2.imwrite(final_rgb_path, (final_image_rgb * 255).astype(np.uint8)):
+            print(f'Saved combined image as {final_rgb_path}')
+        else:
+            print(f"Failed to save image at {final_rgb_path}")
 
-% Process Red Label Images
-for i = 1:length(red_images)
-    img_name = red_images{i};
-    
-    % Read the image
-    original_image = imread(img_name);
-    
-    % Resize the image
-    resized_image = imresize(original_image, target_size);
-    
-    % Convert to grayscale
-    gray_image = rgb2gray(resized_image);
-    
-    % Thresholding using Otsu's method
-    level = graythresh(gray_image);
-    bw_image = imbinarize(gray_image, level);
-    
-    % Apply Canny edge detection
-    edges = edge(bw_image, 'Canny');
-    
-    % Create an empty RGB image for the overlay
-    overlay_image = zeros(size(resized_image), 'uint8');
-    
-    % Place edges in the red channel
-    overlay_image(:,:,1) = edges * 255;  % Red channel
-    
-    % Store the processed image
-    processed_images{end+1} = overlay_image;
-    
-    % Store the red overlay image for addition
-    red_overlay_image = overlay_image;
-    
-    % Display the processed image
-    figure;
-    imshow(overlay_image);
-    title(['Processed Red Label: ', img_name]);
-end
+# Check if output folder has images
+output_files = os.listdir(output_folder)
+if not output_files:
+    print("No images saved in the output folder.")
+else:
+    print(f"Files in the output folder: {output_files}")
 
-% Add the Green and Red Overlay Images
-if ~isempty(green_overlay_image) && ~isempty(red_overlay_image)
-    % Ensure both images are of the same size
-    green_overlay_image = imresize(green_overlay_image, target_size);
-    red_overlay_image = imresize(red_overlay_image, target_size);
-    
-    % Add the green and red overlay images element-wise
-    added_image = green_overlay_image + red_overlay_image;
-    
-    % Display the added image
-    figure;
-    imshow(added_image);
-    title('Added Green and Red Label Images');
-    
-    % Save the added image
-    imwrite(added_image, 'added_label_image.png');
-    disp('Added label image saved as added_label_image.png');
-else
-    disp('Both green and red overlay images must be processed first!');
-end
+# Visualization of one output image
+sample_image_path = os.path.join(output_folder, f'{green_filenames[0].split(".")[0]}_combined.png')
 
-% Optionally, save the processed label images
-for i = 1:length(processed_images)
-    img_name = images_to_display{i};
-    label_image_name = strcat(img_name(1:end-4), '_processed.png');
-    imwrite(processed_images{i}, label_image_name);
-    disp(['Processed label image saved as ', label_image_name]);
-end
+# Ensure the image exists before trying to load
+if os.path.exists(sample_image_path):
+    sample_image = cv2.imread(sample_image_path)
+    
+    if sample_image is not None:
+        # Display the sample image
+        plt.figure()
+        plt.imshow(cv2.cvtColor(sample_image, cv2.COLOR_BGR2RGB))
+        plt.title(f'Sample Image: {green_filenames[0].split(".")[0]}')
+        plt.axis('off')
+        plt.show()
+    else:
+        print(f"Failed to load sample image at {sample_image_path}")
+else:
+    print(f"Sample image file does not exist at {sample_image_path}")
