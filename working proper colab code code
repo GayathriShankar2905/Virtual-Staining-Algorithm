@@ -120,12 +120,18 @@ from matplotlib import pyplot as plt
 from skimage import exposure
 
 # Define paths to green and red image folders
-green_folder = '/content/Green'  # Update with the actual path
+green_folder = '/content/Green folder'  # Update with the actual path
 red_folder = '/content/Red'      # Update with the actual path
 output_folder = '/content/labels'  # Folder to save the labeled images
 
 # Create the output folder if it doesn't exist
 os.makedirs(output_folder, exist_ok=True)
+
+# Clear the output folder before saving new images
+for filename in os.listdir(output_folder):
+    file_path = os.path.join(output_folder, filename)
+    if os.path.isfile(file_path):
+        os.remove(file_path)
 
 # List image filenames from both folders
 green_filenames = sorted([f for f in os.listdir(green_folder) if f.endswith('.jpg')])
@@ -172,10 +178,11 @@ for green_file, red_file in zip(green_filenames, red_filenames):
         green_channel = exposure.rescale_intensity(green_channel, in_range='image')
         red_channel = exposure.rescale_intensity(red_channel, in_range='image')
         
-        # Create the final RGB image
+        # Create the final RGB image with red in the red channel and green in the green channel
         final_image_rgb = np.zeros((desired_size[0], desired_size[1], 3), dtype=np.float32)
         final_image_rgb[:, :, 1] = green_channel  # Green channel
-        final_image_rgb[:, :, 0] = red_channel    # Red channel
+        final_image_rgb[:, :, 2] = red_channel    # Red channel
+        final_image_rgb[:, :, 0] = 0  # Blue channel remains zero
         
         # Save the processed image for U-Net input
         final_rgb_path = os.path.join(output_folder, f'{green_file.split(".")[0]}_combined.png')
