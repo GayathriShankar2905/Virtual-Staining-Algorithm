@@ -1,0 +1,394 @@
+import os
+import time
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import roc_curve, auc
+from monai.transforms import (
+    Compose, LoadImaged, EnsureChannelFirstd, Resized, ScaleIntensityRanged,
+    EnsureTyped, Lambdad, RandRotated, RandGaussianSmoothd, RandScaleIntensityd,
+    RandShiftIntensityd, RandGaussianNoised, RandFlipd, CastToTyped, ToTensord
+)
+from monai.data import CacheDataset, DataLoader, load_decathlon_datalist, list_data_collate
+from monai.networks.nets import UNet
+from torch.nn import MSELoss
+from pytorch_lightning import LightningModule, Trainer
+from torch.utils.tensorboard import SummaryWriter
+from monai.visualize import plot_2d_or_3d_image
+from PIL import Image
+
+data_root = "/kaggle/input/brightfield-vs-fluorescent-staining-dataset"
+dataset_dir = "dataset"
+
+# Ensure dataset directory exists
+if not os.path.exists(dataset_dir):
+    os.makedirs(dataset_dir)
+
+def preprocess_dataset():
+    """Preprocess the dataset according to the given steps."""
+    target_path = os.path.join(dataset_dir, "imagesTr")
+    if not os.path.exists(target_path):
+        os.makedirs(target_path)
+    if not os.path.exists(target_path.replace("imagesTr", "labelsTr")):
+        os.makedirs(target_path.replace("imagesTr", "labelsTr"))
+
+    def resize_image(image, size=(256, 256)):
+        return np.array(Image.fromarray(image).resize(size, Image.Resampling.BICUBIC))
+
+    def normalize_channel(channel):
+        return (channel / 255.0).astype(np.float32)
+
+    def enhance_channel(channel, alpha=1.2, beta=30):
+        return np.clip(channel * alpha + beta, 0, 255).astype(np.uint8)
+
+    def get_viable_cells(red_img, green_img):
+        viable_cells = green_img[:, :, 1] - red_img[:, :, 2]
+        return np.clip(viable_cells, 0, 255).astype(np.uint8)
+
+    dataset_folders = glob(os.path.join(data_root, "Set*"))
+    img_number = 0
+    for folder in dataset_folders:
+        green_imgs_list = glob(os.path.join(folder, "*.1.jpg"))
+        red_imgs_list = glob(os.path.join(folder, "*.2.jpg"))
+        optical_imgs_list = glob(os.path.join(folder, "*.0.jpg"))
+
+        for img_path in tqdm(optical_imgs_list):
+            old_name = os.path.basename(img_path)
+            name = (
+                str(img_number)
+                + "."
+                + str(old_name.split(".")[1])
+                + "."
+                + str(old_name.split(".")[2])
+            )
+
+            # Load images
+            optical_img = np.array(Image.open(img_path))
+            red_img = np.array(Image.open(img_path.replace(".0", ".2")))
+            green_img = np.array(Image.open(img_path.replace(".0", ".1")))
+
+            # Resize images
+            optical_img = resize_image(optical_img)
+            red_img = resize_image(red_img)
+            green_img = resize_image(green_img)
+
+            # Normalize and enhance channels
+            red_img[:, :, 2] = enhance_channel(normalize_channel(red_img[:, :, 2]) * 255)
+            green_img[:, :, 1] = enhance_channel(normalize_channel(green_img[:, :, 1]) * 255)
+
+            # Create label frame
+            label_frame = np.zeros((green_img.shape[0], green_img.shape[1], 3), dtype=np.uint8)
+            if "AO" in folder:
+                viable_cells = get_viable_cells(red_img, green_img)
+                label_frame[:, :, 1] = viable_cells
+            else:
+                label_frame[:, :, 1] = green_img[:, :, 1]
+            label_frame[:, :, 0] = red_img[:, :, 0]
+
+            # Save processed images
+            input_img_path = os.path.join(target_path, name)
+            img = Image.fromarray(optical_img, 'RGB')
+            img.save(input_img_path)
+
+            label_img_path = os.path.join(
+                target_path.replace("imagesTr", "labelsTr"), name.replace(".0", ".3")
+            )
+            img = Image.fromarray(label_frame, 'RGB')
+            img.save(label_img_path)
+            img_number += 1
+
+def load_datasets():
+    """Create train, validation, and test splits and save as JSON."""
+    val_size = 0.15
+    test_size = 0.05
+
+    def get_total_images(folder):
+        return len(glob(os.path.join(folder, "*.0.jpg")))
+
+    def get_thresholds(folder, val_size=0.2, test_size=0.1):
+        total = get_total_images(folder)
+        val_count = int(total * val_size)
+        test_count = int(total * test_size)
+        train_count = total - val_count - test_count
+        return train_count, val_count, test_count
+
+    target_path = os.path.join(dataset_dir, "imagesTr")
+    train_count, val_count, test_count = get_thresholds(target_path, val_size, test_size)
+
+    with open(os.path.join(dataset_dir, "dataset_0.json"), "w") as jsonFile:
+        data = {"training": [], "validation": [], "test": []}
+
+        for i, img_tr in enumerate(glob(os.path.join(target_path, "*jpg"))):
+            new_data_dict = {
+                "image": img_tr,
+                "label": img_tr.replace(".0", ".3").replace("imagesTr", "labelsTr"),
+            }
+            if i >= train_count:
+                if i >= train_count + val_count:
+                    data["test"].append(new_data_dict)
+                else:
+                    data["validation"].append(new_data_dict)
+            else:
+                data["training"].append(new_data_dict)
+
+        json.dump(data, jsonFile)
+
+if __name__ == "__main__":
+    preprocess_dataset()
+    load_datasets()
+    print("Dataset preprocessing and splitting completed.")
+
+###################################################################################
+import os
+from glob import glob
+from tqdm import tqdm
+import torch
+import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
+from pytorch_lightning import LightningModule, Trainer
+from pytorch_lightning.callbacks import ModelCheckpoint
+from sklearn.metrics import roc_auc_score, roc_curve
+from monai.transforms import (
+    Compose, LoadImaged, EnsureChannelFirstd, Resized, ScaleIntensityRanged,
+    EnsureTyped, Lambdad, RandRotated, RandGaussianSmoothd, RandScaleIntensityd,
+    RandShiftIntensityd, RandGaussianNoised, RandFlipd, CastToTyped, ToTensord
+)
+from monai.data import CacheDataset, DataLoader, load_decathlon_datalist, list_data_collate
+from monai.networks.nets import UNet
+from monai.visualize import plot_2d_or_3d_image
+from torch.nn import MSELoss
+from torch.utils.tensorboard import SummaryWriter
+
+dataset_dir = "dataset"
+model_dir = "model"
+
+if not os.path.exists(model_dir):
+    os.makedirs(model_dir)
+
+# Visualization function
+def plot_2_images(image, label):
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    axes[0].imshow(image)
+    axes[0].set_title("Image")
+    axes[0].axis("off")
+
+    axes[1].imshow(label)
+    axes[1].set_title("Label")
+    axes[1].axis("off")
+    plt.show()
+
+# Visualization of microscopy images
+from monai.data.image_reader import PILReader
+image_reader = PILReader()
+for i in range(0, 90, 5):
+    image_path = os.path.join(dataset_dir, f"imagesTr/{i}.0.jpg")
+    label_path = os.path.join(dataset_dir, f"labelsTr/{i}.3.jpg")
+    img = image_reader.read(image_path)
+    lbl = image_reader.read(label_path)
+    plot_2_images(img, lbl)
+
+# Define LightningModule
+class Net(LightningModule):
+    def __init__(self):
+        super().__init__()
+        self._model = UNet(
+            spatial_dims=2,
+            in_channels=3,
+            out_channels=2,  # Two-channel output
+            channels=(32, 64, 128, 256, 512),
+            strides=(2, 2, 2, 2),
+            num_res_units=2,
+            dropout=0.2,
+        )
+        self.loss_function = MSELoss()
+        self.best_val_loss = float("inf")
+        self.best_val_epoch = 0
+
+        self.max_epochs = 700
+        self.check_val = 10
+        self.epoch_loss_values = []
+        self.val_loss_values = []
+
+    def forward(self, x):
+        return self._model(x)
+
+    def prepare_data(self):
+        split_JSON = "dataset_0.json"
+        datasets = os.path.join(dataset_dir, split_JSON)
+        datalist = load_decathlon_datalist(datasets, True, "training")
+        val_files = load_decathlon_datalist(datasets, True, "validation")
+
+        train_transforms = Compose([
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            Lambdad(keys=["label"], func=lambda x: x[:2] / 255.0),
+            Resized(keys=["image", "label"], spatial_size=(256, 256)),
+            ScaleIntensityRanged(keys=["image"], a_min=0, a_max=255, b_min=0, b_max=1),
+            EnsureTyped(keys=["image", "label"]),
+            RandRotated(keys=["image", "label"], range_x=0.3, range_y=0.3, mode=["bilinear", "nearest"]),
+            RandGaussianSmoothd(keys=["image"], sigma_x=(0.5, 1.15), sigma_y=(0.5, 1.15)),
+            RandScaleIntensityd(keys=["image"], factors=0.2),
+            RandShiftIntensityd(keys=["image"], offsets=0.05),
+            RandFlipd(keys=["image", "label"], spatial_axis=0),
+            ToTensord(keys=["image", "label"]),
+        ])
+
+        val_transforms = Compose([
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            Lambdad(keys=["label"], func=lambda x: x[:2] / 255.0),
+            Resized(keys=["image", "label"], spatial_size=(256, 256)),
+            ScaleIntensityRanged(keys=["image"], a_min=0, a_max=255, b_min=0, b_max=1),
+            EnsureTyped(keys=["image", "label"]),
+        ])
+
+        self.train_ds = CacheDataset(data=datalist, transform=train_transforms, cache_num=10, cache_rate=1.0)
+        self.val_ds = CacheDataset(data=val_files, transform=val_transforms, cache_num=4, cache_rate=1.0)
+
+    def train_dataloader(self):
+        return DataLoader(self.train_ds, batch_size=10, shuffle=True, num_workers=4)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_ds, batch_size=10, shuffle=False, num_workers=4)
+
+    def configure_optimizers(self):
+        return torch.optim.AdamW(self._model.parameters(), lr=1e-4, weight_decay=1e-5)
+
+    def training_step(self, batch, batch_idx):
+        images, labels = batch["image"].to(self.device), batch["label"].to(self.device)
+        outputs = self(images)
+        loss = self.loss_function(outputs, labels)
+        self.log("train_loss", loss)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        images, labels = batch["image"].to(self.device), batch["label"].to(self.device)
+        outputs = self(images)
+        loss = self.loss_function(outputs, labels)
+        self.log("val_loss", loss)
+
+        # Compute ROC and AUC for the first batch
+        if batch_idx == 0:
+            y_true = labels.cpu().numpy().flatten()
+            y_pred = outputs.cpu().detach().numpy().flatten()
+            fpr, tpr, _ = roc_curve(y_true, y_pred)
+            auc_score = roc_auc_score(y_true, y_pred)
+            print(f"Validation AUC: {auc_score:.4f}")
+
+            # Plot ROC curve
+            plt.figure(figsize=(8, 6))
+            plt.plot(fpr, tpr, label=f"ROC Curve (AUC = {auc_score:.4f})")
+            plt.plot([0, 1], [0, 1], "--", color="gray")
+            plt.xlabel("False Positive Rate")
+            plt.ylabel("True Positive Rate")
+            plt.title("ROC Curve")
+            plt.legend(loc="lower right")
+            plt.grid()
+            plt.show()
+
+        return loss
+
+# Train the model
+net = Net()
+checkpoint_callback = ModelCheckpoint(dirpath=model_dir, filename="best_model", save_last=True)
+
+trainer = Trainer(
+    precision=16,
+    accelerator="gpu",
+    devices=1,
+    max_epochs=net.max_epochs,
+    check_val_every_n_epoch=net.check_val,
+    callbacks=[checkpoint_callback],
+    default_root_dir=model_dir
+)
+
+trainer.fit(net)
+
+######################################################################################################
+import os
+import torch
+import torchvision.transforms as T
+from monai.data import CacheDataset, load_decathlon_datalist
+from monai.transforms import (
+    Compose, LoadImaged, EnsureChannelFirstd, Resized, ScaleIntensityRanged,
+    CastToTyped, EnsureTyped
+)
+from monai.inferers import sliding_window_inference
+import matplotlib.pyplot as plt
+
+# Define directories
+dataset_dir = "dataset"
+model_dir = "model"
+best_model_path = os.path.join(model_dir, "best_metric_model.ckpt")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load validation dataset for preprocessed data
+split_JSON = "dataset_0.json"
+datasets = os.path.join(dataset_dir, split_JSON)
+val_files = load_decathlon_datalist(datasets, True, "validation")
+
+val_transform = Compose([
+    LoadImaged(keys=["image", "label"]),
+    EnsureChannelFirstd(keys=["image", "label"]),
+    Resized(keys=["image", "label"], spatial_size=(256, 256)),
+    ScaleIntensityRanged(
+        keys=["image"], a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0, clip=True
+    ),
+    CastToTyped(keys=["image", "label"], dtype=(torch.float32, torch.float32)),
+    EnsureTyped(keys=["image", "label"]),
+])
+
+val_ds = CacheDataset(
+    data=val_files,
+    transform=val_transform,
+    cache_num=10,
+    cache_rate=1.0,
+    num_workers=4,
+)
+
+# Visualization helper function
+def plot_3_images(image, label, output):
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    axes[0].imshow(image, cmap="gray")
+    axes[0].set_title("Input Image")
+    axes[0].axis("off")
+
+    axes[1].imshow(label, cmap="gray")
+    axes[1].set_title("Ground Truth Label")
+    axes[1].axis("off")
+
+    axes[2].imshow(output, cmap="gray")
+    axes[2].set_title("Model Prediction")
+    axes[2].axis("off")
+    plt.show()
+
+# Load the best model
+model = Net.load_from_checkpoint(best_model_path)
+model.eval()
+model.to(device)
+
+# Initialize transform to visualize images
+y = torch.zeros(1, 256, 256)
+transform = T.ToPILImage()
+
+# Inference and visualization
+for k in range(10):
+    case_num = k
+    with torch.no_grad():
+        img = val_ds[case_num]["image"]
+        label = val_ds[case_num]["label"]
+        val_inputs = torch.unsqueeze(img, 0).to(device)
+        val_labels = torch.unsqueeze(label, 0).to(device)
+        val_outputs = sliding_window_inference(val_inputs, (256, 256), 1, model)
+
+        img_val_inputs = transform(val_inputs.detach().cpu()[0])
+        img_val_labels = transform(torch.vstack((val_labels.detach().cpu()[0], y)))
+        img_val_outputs = transform(torch.vstack((val_outputs.detach().cpu()[0], y)))
+
+        plot_3_images(img_val_inputs, img_val_labels, img_val_outputs)
+
+plt.show()
+
+
+
